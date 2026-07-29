@@ -1,0 +1,89 @@
+# ---------------------------------------------------------------------------
+# Rust / Cargo
+# ---------------------------------------------------------------------------
+/target/
+**/target/
+# Cargo.lock is intentionally NOT ignored: this crate builds a Python
+# extension (cdylib), not a library consumed by other crates, so the lock
+# file is committed for reproducible wheel builds.
+
+# ---------------------------------------------------------------------------
+# CUDA / native build artifacts (csrc/ compiled objects)
+# ---------------------------------------------------------------------------
+*.o
+*.obj
+*.ptx
+*.cubin
+*.fatbin
+*.so
+*.pyd
+*.dll
+*.dylib
+*.lib
+*.exp
+*.pdb
+*.i
+*.ii
+*.gpu
+nvcc_error.log
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+wheelhouse/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.whl
+.venv/
+venv/
+env/
+
+# ---------------------------------------------------------------------------
+# Maturin
+# ---------------------------------------------------------------------------
+/custom_cuda/_native*.so
+/custom_cuda/_native*.pyd
+
+# ---------------------------------------------------------------------------
+# Benchmark & profiling outputs
+# ---------------------------------------------------------------------------
+benchmarks/**/*.csv
+benchmarks/**/*.json
+benchmarks/results/
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+*.qdrep
+
+# CLI `profile` command output (Chrome trace JSON files)
+/profiles/
+
+# Note: visualizations/**/*.png|svg were previously ignored here as
+# "regeneratable build artifacts," same as the benchmark CSVs above.
+# That's wrong for this repo: the README embeds specific chart files as
+# the finished, showcased deliverable, not raw data — they need to be
+# committed for the repo to render correctly on GitHub. Charts are
+# tracked; regenerate via `custom_cuda_cli visualize <kernel>` or
+# `scripts/plot_*.py` if the underlying benchmark data changes.
+
+# ---------------------------------------------------------------------------
+# Editor / OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+*.log
+.env

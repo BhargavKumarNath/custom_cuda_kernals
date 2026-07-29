@@ -1,0 +1,63 @@
+[package]
+name = "custom-cuda-kernels"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Bhargav Kumar Nath <bhargavkumarnathh@gmail.com>"]
+description = "Production-grade CUDA kernel acceleration library for LLM/RAG/MoE/GNN workloads, exposed to PyTorch as zero-copy Rust/PyO3 extensions."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bhargavkumarnathh/custom-cuda-kernels"
+readme = "README.md"
+keywords = ["cuda", "pytorch", "pyo3", "gpu", "kernels"]
+categories = ["science", "api-bindings"]
+build = "build.rs"
+
+# ---------------------------------------------------------------------------
+# Compiled extension module. `name` here must match [tool.maturin].module-name
+# in pyproject.toml (minus the parent package path), i.e. the compiled
+# artifact lands at `custom_cuda/_native.<ext>` and is imported from Python as
+# `custom_cuda._native`.
+# ---------------------------------------------------------------------------
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3: safe Rust <-> CPython bindings. abi3 pins to the stable ABI so a
+# single wheel works across CPython minor versions without per-version
+# rebuilds.
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
+
+# numpy = optional host-side interop / test fixtures for CPU-side tensor
+# construction from Rust (not used on the zero-copy GPU hot path).
+numpy = "0.29"
+
+# DLPack producer/consumer support for zero-copy GPU tensor exchange between
+# PyTorch and Rust. Wraps DLManagedTensor capsules so device pointers,
+# strides, dtype, and device context cross the Rust/Python boundary without
+# copying or CPU staging. (Referred to as "pyo3-dlpack" in project docs;
+# `dlpark` is the crate that currently implements this on crates.io.)
+dlpark = { version = "0.8", features = ["pyo3"] }
+
+# Raw C-FFI plumbing to the CUDA runtime / driver API surface and to the
+# csrc/ static objects linked in by build.rs.
+libc = "0.2"
+
+# Ergonomic, zero-cost error types for the CFFI boundary (CUDA error codes,
+# shape/stride/dtype validation failures) surfaced to Python as PyErr.
+thiserror = "1.0"
+
+[build-dependencies]
+# Used by build.rs to shell out to `nvcc`, discover CUDA_HOME / CUDA_PATH,
+# and drive static linking of the compiled csrc/ objects into the crate.
+cc = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1

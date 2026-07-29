@@ -1,0 +1,82 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "custom-cuda-kernels"
+version = "0.1.0"
+description = "Portfolio-grade custom CUDA kernel library for LLM/RAG/MoE/GNN workloads, wrapped in Rust (PyO3 + DLPack) and exposed to PyTorch as zero-copy ops."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Bhargav Kumar Nath", email = "bhargavkumarnathh@gmail.com" }]
+keywords = ["cuda", "pytorch", "gpu", "kernels", "pyo3", "llm", "moe", "rag", "gnn"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Environment :: GPU :: NVIDIA CUDA",
+]
+dependencies = [
+  "torch>=2.3",
+  "typer>=0.12",
+  "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-benchmark>=4.0",
+  "numpy>=1.26",
+  "ruff>=0.8",
+]
+viz = [
+  "matplotlib>=3.8",
+  "seaborn>=0.13",
+  "pandas>=2.2",
+]
+baselines = [
+  "triton>=3.0; platform_system == 'Linux'",
+]
+
+[project.urls]
+Repository = "https://github.com/bhargavkumarnathh/custom-cuda-kernels"
+
+# ---------------------------------------------------------------------------
+# CLI (Phase 7): a `cargo`/`docker`/`uv`-style developer toolkit for
+# evaluating, benchmarking, and auditing the kernels in this repo — see
+# custom_cuda/cli/ for implementation, `custom_cuda_cli --help` for usage.
+# ---------------------------------------------------------------------------
+[project.scripts]
+custom_cuda_cli = "custom_cuda.cli:main"
+
+# ---------------------------------------------------------------------------
+# Maturin: builds the Rust cdylib (Cargo.toml) and drops it into the
+# `custom_cuda` Python package as the `_native` compiled submodule, alongside
+# the pure-Python package under custom_cuda/ at the repo root.
+# ---------------------------------------------------------------------------
+[tool.maturin]
+python-source = "."
+module-name = "custom_cuda._native"
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+  "cuda: marks tests that require a CUDA-capable GPU",
+  "slow: marks long-running numerical/edge-case tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
