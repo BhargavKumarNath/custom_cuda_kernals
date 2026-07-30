@@ -154,79 +154,113 @@ The individual kernel benchmarks measure the performance improvement of each ope
 
 ## The 12 Kernels
 
-Every kernel below was built through the same six-step process: write a correctness baseline and pytest suite first, implement a first-pass CUDA kernel, bind it through Rust/PyO3, validate correctness across fp32/fp16/bf16 and edge cases, benchmark on real hardware with L2 flushing, then plot the results. Full design history - including the failed first attempts - is in `project_plan.md`.
+Each kernel in this repository follows the same development process: establish a correctness baseline and test suite, implement an initial CUDA kernel, integrate it with PyTorch through Rust and PyO3, validate correctness across multiple data types and edge cases, benchmark on real hardware, and iterate based on profiling results. The complete development history, including optimization attempts that did not improve performance, is documented in `project_plan.md`.
 
 ### Core Transformer Ops
 
-**Kernel 1 - Fused RMSNorm + Residual Addition**
-`y, residual_out = RMSNorm(x + residual) * weight, x + residual` in one launch instead of a separate add-then-normalize pair.
-- *Techniques:* single-pass block reduction (warp-shuffle `__shfl_down_sync` + shared-memory cross-warp combine) for the sum-of-squares statistic; `float4`/vectorized loads and stores; fused residual-write and normalized-write from one register tile.
-- *Result:* **4.2-4.8x faster** (fp16/bf16), **2.4x** (fp32) vs. eager, **78-89% of peak memory bandwidth**. A shared-memory row-staging variant was tried and rejected - the redundant reread it targeted was already an L2 hit.
+**Kernel 1: Fused RMSNorm + Residual Addition**
 
-**Kernel 2 - Fused SwiGLU Gated Activation**
-`y = SiLU(gate) * up`, fusing the activation and the elementwise multiply over the FFN's large intermediate tensor.
-- *Techniques:* single-pass elementwise fusion; `float4` (fp32) / `uint4`-packed `half2`/`bf16x2` (fp16/bf16) vectorized access with a 16-byte-alignment check gating a scalar fallback for any non-vector-width-divisible remainder.
-- *Result:* **2.4-6.4x faster** vs. a two-kernel eager baseline. Vectorization closed a mid-size bandwidth gap from 75% to 85.5% of peak on the shapes it targeted.
+Computes `y, residual_out = RMSNorm(x + residual) * weight, x + residual` in a single kernel launch.
 
-**Kernel 3 - Fused Rotary Position Embedding (RoPE)**
-Rotates Q and K together in one launch given precomputed sin/cos tables, correctly handling grouped-query attention's mismatched Q/K head counts.
-- *Techniques:* one kernel launch rotates both Q and K (dispatching per-row on which tensor a given block index falls into); vectorized half-head-dim access; block size fixed to one warp for the vectorized path after profiling caught a launch-config bug in the first vectorized attempt.
-- *Result:* **3.3-9.1x faster** vs. eager. Fixing the vectorized kernel's block size (a real bug, not a design tradeoff) improved fp16/bf16 bandwidth by 8-16 percentage points across nearly every shape.
+* **Implementation:** Single-pass block reduction using warp shuffle operations (`__shfl_down_sync`) with shared-memory reduction across warps. Vectorized `float4` loads and stores reduce memory transactions while the residual update and normalization are fused into one pass.
+* **Result:** **4.2 to 4.8× faster** for fp16/bf16 and **2.4× faster** for fp32 compared with the PyTorch eager implementation, achieving **78 to 89%** of theoretical memory bandwidth. A shared-memory staging approach was evaluated but did not improve performance and was therefore not adopted.
 
-### Compute & Loss Optimizations
+**Kernel 2: Fused SwiGLU Activation**
 
-**Kernel 4 - Fused Linear Cross-Entropy Loss**
-Fuses the vocabulary projection with cross-entropy using chunked online-softmax, so the full `[tokens, vocab]` logits tensor - multiple gigabytes at Llama-3's 128K vocabulary - is never materialized.
-- *Techniques:* vocab-dimension tiling with a running max/sum carried across chunks; the chunk's matmul is left to cuBLAS via PyTorch, with the CUDA kernel fusing the online-softmax update and target-logit gather for that chunk into one pass.
-- *Result:* **12.5-31.3x peak-VRAM reduction** on realistic Llama-3-vocab shapes (target was ≥4x). A native-dtype rewrite (avoiding an `.float()` upcast copy in the first version) brought latency overhead from ~10-14% down to roughly zero.
+Computes `y = SiLU(gate) * up` in a single pass.
 
-**Kernel 5 - Fused MatMul + Add Bias**
-`y = x @ Wᵀ + b` with the bias-add fused into the GEMM epilogue instead of a separate elementwise pass.
-- *Techniques:* shared-memory-tiled GEMM with 1D register blocking - each thread accumulates 8 output elements along M instead of 1, so each shared-memory read is reused across 8 FMAs.
-- *Result (honest miss):* register blocking took the kernel from ~1.3 TFLOPS to **1.8-3.0 TFLOPS**, but that's still short of both the naive-unfused target and cuBLAS's throughput - cuBLAS's fp16/bf16 path uses tensor cores, which no amount of CUDA-core tiling matches without WMMA/MMA intrinsics. Reported as a miss rather than reframed against a softer baseline.
+* **Implementation:** Fuses the activation and multiplication into one kernel. Vectorized memory access is used for fp32 (`float4`) and fp16/bf16 (`uint4` packed `half2`/`bf16x2`) with a scalar fallback for unaligned regions.
+* **Result:** **2.4 to 6.4× faster** than the equivalent eager implementation. Vectorized memory access increased measured memory bandwidth utilisation from approximately **75%** to **85.5%** for supported tensor sizes.
 
-### MoE Routing & Permutation
+**Kernel 3: Fused Rotary Position Embedding (RoPE)**
 
-**Kernel 6 - MoE Top-K Router**
-Fuses softmax gating and top-k expert selection into one kernel, entirely register-resident with zero host-device synchronization.
-- *Techniques:* one warp per token; softmax via warp-shuffle max/sum reduction; top-k via `k` rounds of warp-wide argmax-and-mask, no shared memory.
-- *Result:* first pass beat eager by only 1.1-2.2x against a ≥3x target - profiling showed the kernel was launch-overhead-bound (every shape finishes in well under a millisecond), not compute-bound. Doubling warps-per-block from 8 to 16 halved the blocks launched and took the Mixtral-scale fp16 case to **3.35x**, clearing the target.
+Applies rotary position embeddings to both query and key tensors within a single kernel launch.
 
-**Kernel 7 - Token Scatter/Gather (Permute / Unpermute)**
-Reorders token embeddings into contiguous per-expert buffers for MoE dispatch, and gathers them back with the weighted-gate combine fused into the same pass.
-- *Techniques:* both directions expressed as pure gathers, never scatter-add/atomics; permutation indices computed once via `argsort`, the CUDA kernels handle only the bandwidth-critical row movement; alignment-gated vectorized `uint4` copies with a scalar fallback.
-- *Result:* permute lands within a few percent of PyTorch's own `index_select` (85-97% of peak bandwidth); the fused unpermute+combine beats eager's naive fancy-indexing chain by **3.2-8.6x** (75-92% of peak bandwidth), since eager materializes a full intermediate tensor that the fused kernel never allocates.
+* **Implementation:** Processes both tensors in one dispatch while supporting grouped-query attention with different numbers of query and key-value heads. Uses vectorized access across the head dimension.
+* **Result:** **3.3 to 9.1× faster** than eager execution. Profiling identified a launch configuration issue in the initial vectorized implementation, and correcting it increased fp16/bf16 bandwidth by **8 to 16 percentage points** across most benchmarked shapes.
 
-### RAG & Vector Search
+---
 
-**Kernel 8 - Fused Cosine Similarity + Top-K**
-Computes cosine similarity between queries and a candidate pool and returns the top-k matches without ever materializing the full `[queries, candidates]` score matrix.
-- *Techniques:* L2 normalization fused into the dot-product accumulation loop; a two-kernel partition-then-merge design so the grid scales with candidate-pool size even when the query count is tiny.
-- *Result:* the first version was 20-97x *slower* than eager - a grid-sizing bug meant parallelism scaled with query count only, and realistic RAG shapes have few queries against huge candidate pools. The partition/merge redesign recovered it to 1.7-5.1x slower than eager (short of the ≥3x-faster target, the same cuBLAS-tensor-core gap as Kernel 5) - a dramatic fix, reported honestly as still short of target.
+### Compute and Loss Operations
 
-**Kernel 9 - Block Pairwise Distance Matrix**
-Computes the full squared-Euclidean distance matrix between two vector sets using a shared-memory tiled block algorithm, with an explicit clamp guarding against floating-point cancellation.
-- *Techniques:* reuses Kernel 5's register-blocked tiled-GEMM structure; `dist_sq = max(‖a‖² + ‖b‖² − 2·a·b, 0)` epilogue.
-- *Result:* **1.7-1.8x faster** than `torch.cdist` at large matrix sizes with modest embedding dimensions, but 2.2x *slower* at large embedding dimensions (≥1536) - cuBLAS's GEMM scales better with reduction depth than a hand-tiled kernel without tensor cores. A `kBlockK=8→16` widening was tried to close the gap and measured no improvement; reverted.
+**Kernel 4: Fused Linear Cross-Entropy Loss**
 
-### Graph & Sequential Algorithms
+Combines the vocabulary projection and cross-entropy computation using chunked online softmax so the full logits matrix is never materialized.
 
-**Kernel 10 - Spatiotemporal Graph Message Passing**
-One step of neighborhood aggregation over spatial and temporal edge sets, for GNN workloads over sensor/traffic-network-style graphs.
-- *Techniques:* CSR-based neighbor iteration (edges pre-sorted by destination node); the feature dimension, not the neighbor list, is split across a warp's lanes, so every output element is owned by exactly one lane - atomics are eliminated entirely rather than merely reduced.
-- *Result:* **2.3-4.1x faster** than a `scatter_add`-based reference for graphs with 20,000+ nodes, meeting the ≥2x target; falls short at very small graphs (2,000 nodes) where launch overhead dominates, reported as-is.
+* **Implementation:** Processes the vocabulary dimension in tiles while maintaining running softmax statistics. Matrix multiplication is performed by cuBLAS through PyTorch, while the custom kernel performs the online softmax update and target logit extraction.
+* **Result:** **12.5 to 31.3× lower peak VRAM usage** than the reference implementation. Eliminating an unnecessary fp32 conversion removed almost all additional runtime overhead.
 
-**Kernel 11 - Parallel Viterbi Algorithm**
-Batched HMM decoding via a single persistent kernel that loops over the entire sequence internally, instead of one kernel launch per timestep.
-- *Techniques:* one block per batch item; the transition matrix is staged into shared memory once and stays resident for the whole recursion; warp-shuffle max-reduction for the final argmax-over-states step.
-- *Result:* **20-120x faster** than a per-timestep Python loop across every sequence length, batch size, and state count tested - the target was ≥5x. Kernel launch count drops from O(sequence length) to exactly 1.
+**Kernel 5: Fused Matrix Multiplication + Bias**
 
-### Precision & Quantization
+Computes `y = x @ Wᵀ + b` by incorporating the bias addition into the GEMM epilogue.
 
-**Kernel 12 - FP8 Dynamic Quantization & Casting**
-Computes a dynamic per-block (128×128 tile) or per-tensor scale from a tensor's live amax and casts to fp8 (e4m3/e5m2) in a fused pass, DeepSeek-V3-style.
-- *Techniques:* one thread block per 128×128 tile does its own amax reduction, scale derivation, and cast+store with zero cross-block communication; 16 fp8 bytes packed into a `uint4` for vectorized stores.
-- *Result:* **3.1-11.7x faster** than a separate amax-then-cast reference (target was ≥2x), reaching **up to 87% of the theoretical single-pass memory-bandwidth ceiling** - strong evidence the fused kernel's second read is being served from L2 cache rather than a second DRAM round trip.
+* **Implementation:** Shared-memory tiled GEMM with one-dimensional register blocking, allowing each thread to accumulate multiple output values before writing back to memory.
+* **Result:** Throughput increased from approximately **1.3 TFLOPS** to between **1.8 and 3.0 TFLOPS**. Although this improves on the initial implementation, performance remains below cuBLAS, whose fp16 and bf16 implementations make extensive use of tensor cores.
+
+---
+
+### Mixture-of-Experts Operations
+
+**Kernel 6: MoE Top-K Router**
+
+Fuses softmax computation and top-k expert selection into a single kernel.
+
+* **Implementation:** Assigns one warp per token. Warp shuffle reductions compute the softmax, followed by repeated warp-wide argmax selection for top-k routing.
+* **Result:** Increasing the number of warps per block from 8 to 16 improved occupancy and achieved up to **3.35×** speedup on Mixtral-sized fp16 workloads.
+
+**Kernel 7: Token Scatter/Gather**
+
+Permutes token embeddings into contiguous expert buffers and reconstructs the original ordering after expert execution.
+
+* **Implementation:** Expresses both permutation directions as gather operations while fusing the weighted gate combination into the unpermutation step. Vectorized copies are used where alignment permits.
+* **Result:** Permutation performance approaches PyTorch's `index_select`, while the fused unpermute operation is **3.2 to 8.6× faster** than an eager implementation by avoiding intermediate tensor allocation.
+
+---
+
+### Retrieval and Vector Search
+
+**Kernel 8: Fused Cosine Similarity + Top-K**
+
+Computes cosine similarity and top-k selection without constructing the full similarity matrix.
+
+* **Implementation:** Fuses L2 normalization into the dot-product calculation and uses a two-stage partition-and-merge strategy to improve scalability across large candidate sets.
+* **Result:** Redesigning the work distribution substantially improved performance compared with the initial implementation. The final kernel remains slower than the cuBLAS-backed baseline but demonstrates the impact of improved parallel workload distribution.
+
+**Kernel 9: Pairwise Distance Matrix**
+
+Computes squared Euclidean distances between two sets of vectors using shared-memory tiling.
+
+* **Implementation:** Extends the tiled GEMM structure from Kernel 5 and computes distances using `‖a‖² + ‖b‖² - 2a·b`, with clamping to prevent negative values caused by floating-point error.
+* **Result:** **1.7 to 1.8× faster** than `torch.cdist` for large matrices with moderate embedding dimensions, while performance falls behind cuBLAS-backed implementations for very high-dimensional inputs.
+
+---
+
+### Graph and Sequential Algorithms
+
+**Kernel 10: Spatiotemporal Graph Message Passing**
+
+Performs neighborhood aggregation for graph neural network workloads.
+
+* **Implementation:** Uses CSR-formatted adjacency lists and distributes feature computation across warp lanes so each output element is owned by a single thread, avoiding atomic operations.
+* **Result:** **2.3 to 4.1× faster** than a `scatter_add` reference implementation for graphs with more than 20,000 nodes.
+
+**Kernel 11: Parallel Viterbi Algorithm**
+
+Implements batched Hidden Markov Model decoding using a persistent CUDA kernel.
+
+* **Implementation:** Processes the complete sequence within a single kernel launch. The transition matrix remains resident in shared memory throughout the recursion, while warp reductions compute the final maximum over states.
+* **Result:** **20 to 120× faster** than a Python implementation that launches one kernel per timestep, while reducing kernel launches from one per timestep to a single launch.
+
+---
+
+### Quantization
+
+**Kernel 12: FP8 Dynamic Quantization**
+
+Performs dynamic scaling and FP8 conversion in a single pass.
+
+* **Implementation:** Each thread block computes the local maximum value, derives the scaling factor, and writes FP8 output directly. Vectorized stores pack sixteen FP8 values into a `uint4`.
+* **Result:** **3.1 to 11.7× faster** than a two-pass reference implementation while reaching **up to 87%** of the theoretical memory bandwidth limit for a single-pass kernel.
 
 ## Developer CLI (`custom_cuda_cli`)
 
