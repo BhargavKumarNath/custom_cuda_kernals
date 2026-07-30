@@ -622,16 +622,16 @@ rather than committed wholesale.
 
 | Phase | Scope | Kernels | Status |
 |-------|-------|---------|--------|
-| **Phase 0** | Workspace Setup & Infrastructure — directory layout, `Cargo.toml`, `pyproject.toml`, `.gitignore`, this document | — | ✅ Complete |
-| **Phase 1** | Core Transformer Operations | 1. Fused RMSNorm + Residual · 2. Fused SwiGLU · 3. Fused RoPE | ✅ Complete |
-| **Phase 2** | Compute & Loss Optimizations | 4. Fused Linear Cross Entropy Loss · 5. Fused MatMul Add Bias | ✅ Complete |
-| **Phase 3** | MoE Routing & Permutation | 6. MoE Top-K Router · 7. Token Scatter/Gather | ✅ Complete |
-| **Phase 4** | RAG & Vector Search Accelerators | 8. Fused Cosine Similarity + Top-K · 9. Block Pairwise Distance Matrix | ✅ Complete |
-| **Phase 5** | Graph & Sequence Algorithms | 10. Spatiotemporal Graph Message Passing · 11. Parallel Viterbi (HMM) | ✅ Complete |
-| **Phase 6** | Precision & Quantization | 12. FP8 Dynamic Quantization & Casting | ✅ Complete |
-| **Phase 7** | Documentation, Portfolio Polish, Final Benchmark Packaging, and Developer CLI | `custom_cuda_cli` toolkit (doctor/info/verify/benchmark/compare/visualize/profile/list/help), `examples/llama_block.py` integration proof, `README.md` | ✅ Complete |
+| **Phase 0** | Workspace Setup & Infrastructure — directory layout, `Cargo.toml`, `pyproject.toml`, `.gitignore`, this document | — | Complete |
+| **Phase 1** | Core Transformer Operations | 1. Fused RMSNorm + Residual · 2. Fused SwiGLU · 3. Fused RoPE |  Complete |
+| **Phase 2** | Compute & Loss Optimizations | 4. Fused Linear Cross Entropy Loss · 5. Fused MatMul Add Bias |  Complete |
+| **Phase 3** | MoE Routing & Permutation | 6. MoE Top-K Router · 7. Token Scatter/Gather |  Complete |
+| **Phase 4** | RAG & Vector Search Accelerators | 8. Fused Cosine Similarity + Top-K · 9. Block Pairwise Distance Matrix |  Complete |
+| **Phase 5** | Graph & Sequence Algorithms | 10. Spatiotemporal Graph Message Passing · 11. Parallel Viterbi (HMM) |  Complete |
+| **Phase 6** | Precision & Quantization | 12. FP8 Dynamic Quantization & Casting |  Complete |
+| **Phase 7** | Documentation, Portfolio Polish, Final Benchmark Packaging, and Developer CLI | `custom_cuda_cli` toolkit (doctor/info/verify/benchmark/compare/visualize/profile/list/help), `examples/llama_block.py` integration proof, `README.md` |  Complete |
 
-### Phase 0 checklist — ✅ Complete
+### Phase 0 checklist - Complete
 
 - [x] Directory hierarchy (`csrc/`, `src/kernels/`, `custom_cuda/kernels/`,
       `baselines/`, `tests/`, `benchmarks/`, `visualizations/<per-kernel>/`,
@@ -648,7 +648,7 @@ rather than committed wholesale.
       generated visualization images, standard Python/OS artifacts
 - [x] `project_plan.md` (this document)
 
-### Phase 1 checklist — ✅ Complete
+### Phase 1 checklist - Complete
 
 Adaptive, empirically-driven execution per kernel (Section 2's six-step
 lifecycle still applies; the CUDA-engineering step is iterative rather than
@@ -733,7 +733,7 @@ single-pass):
       `batchsweep_16_float16`: 67.8% -> 83.1% of peak). Visualized
       (`scripts/plot_rope.py` -> `visualizations/03_fused_rope/`).
 
-### Phase 2 checklist — ✅ Complete
+### Phase 2 checklist - Complete
 
 Same adaptive lifecycle as Phase 1.
 
@@ -841,7 +841,7 @@ Same adaptive lifecycle as Phase 1.
       chart replacing the standard bandwidth-vs-peak chart (this op is
       compute-bound, not bandwidth-bound, at realistic sizes).
 
-### Phase 3 checklist — ✅ Complete
+### Phase 3 checklist - Complete
 
 Same adaptive lifecycle as Phase 1/2.
 
@@ -930,7 +930,7 @@ Same adaptive lifecycle as Phase 1/2.
       bandwidth-vs-peak chart rather than folding a near-parity (not a
       blowout) result into the same comparison.
 
-### Phase 4 checklist — ✅ Complete
+### Phase 4 checklist - Complete
 
 Same adaptive lifecycle as Phase 1-3.
 
@@ -1060,7 +1060,7 @@ Same adaptive lifecycle as Phase 1-3.
       names a bandwidth target directly) alongside the speedup and
       TFLOPS-vs-dim charts.
 
-### Phase 5 checklist — ✅ Complete
+### Phase 5 checklist - Complete
 
 Same adaptive lifecycle as Phase 1-4.
 
@@ -1209,7 +1209,7 @@ Same adaptive lifecycle as Phase 1-4.
       reference line) alongside latency-vs-sequence-length,
       latency-vs-batch, and latency-vs-state-count charts.
 
-### Phase 6 checklist — ✅ Complete
+### Phase 6 checklist - Complete
 
 - [x] Kernel 12 — FP8 Dynamic Quantization & Casting Kernel.
       Baselines/tests (`baselines/fp8_quant.py`,
@@ -1357,7 +1357,7 @@ block, not the kernel in isolation.
     real, honest improvement in an actual model" — and confirms it
     does, without overstating by how much.
 
-### Phase 7 checklist — ✅ Complete
+### Phase 7 checklist —  Complete
 
 Original scope ("Documentation, Portfolio Polish, and Final Benchmark
 Packaging") expanded mid-phase at the user's request to add a
