@@ -89,19 +89,45 @@ The compiled CUDA object files are packaged into a static library and linked dir
 
 ## Engineering Principles
 
-A few rules were enforced across every one of the 12 kernels, not just the first few:
+The following principles were applied consistently across all 12 kernels in the repository.
 
-- **Zero-copy GPU residency.** Every kernel operates directly on the tensor's existing device memory. No kernel in this repo calls `.cpu()`, `.to(device)`, or stages data through host memory during its forward pass - validation and pointer extraction happen in Rust, but the actual bytes never leave the GPU.
-- **Hardware-level benchmarking, not wall-clock timing.** Every number in this README and in `project_plan.md` comes from `benchmarks/*.py`: CUDA events (`torch.cuda.Event(enable_timing=True)`) for sub-microsecond-accurate GPU-side timing, a 256 MB scratch buffer filled between every measured iteration to flush the L2 cache (so iteration *N* isn't measuring a warm cache left over from iteration *N-1*), and a median + interquartile range over at least 100 measured iterations after a warmup period.
-- **Empirical iteration, not speculative optimization.** Every kernel started as a straightforward first-pass implementation, got benchmarked, and only then got optimized - based on what the profiling data actually showed was the bottleneck, not on which technique sounded like it should help. Three kernels in this repo had an optimization hypothesis tested and **rejected** because it measured no improvement or a regression: Kernel 1's shared-memory row-staging variant (the "redundant" reread it targeted was already an L2 hit, not a DRAM round trip - no gain, and a ~5% regression from lower occupancy), Kernel 9's `kBlockK=8→16` widening (no throughput change, worse at some sizes), and Kernel 3's first vectorization attempt (a genuine launch-configuration bug that made it *slower*, caught and fixed rather than shipped). All three are written up with the actual numbers in `project_plan.md`, not omitted.
-- **Honest shortfall reporting.** Two of twelve kernels - Kernel 5 (fused MatMul + bias) and Kernel 8 (fused cosine similarity top-k) - do not hit their stated performance target against cuBLAS-backed baselines, and Kernel 9 misses its target at large embedding dimensions. All three are reported as misses, with the actual measured numbers and the reason (no tensor cores - a hand-tiled kernel isn't going to out-throughput a vendor GEMM library written by people who've spent years on exactly that) rather than reframed against a softer baseline until they looked like wins.
-- **Correctness before performance, every time.** No benchmark number in this repository was generated before its kernel's correctness suite passed. 1,665 tests across `tests/` cover fp32/fp16/bf16, non-contiguous input tensors, and edge-case shapes (empty batches, dim=1, single-row/single-token inputs, non-power-of-two dimensions) for every one of the 12 kernels - 1,539 of them run in a few dozen seconds without needing `torch.compile`, the rest cross-check against `torch.compile` for the shapes where that comparison is meaningful.
+**Zero-copy GPU residency.** Every kernel operates directly on the tensor memory already allocated by PyTorch on the GPU. No kernel performs `.cpu()`, `.to(device)`, or transfers data through host memory during execution. The Rust layer handles validation and pointer extraction, while the actual tensor data remains on the GPU throughout the computation.
+
+**GPU-level benchmarking instead of wall-clock timing.** All performance results reported in this repository and in `project_plan.md` are generated from the scripts in `benchmarks/`. Measurements use CUDA events (`torch.cuda.Event(enable_timing=True)`) to capture GPU execution time accurately rather than relying on CPU wall-clock timers.
+
+To reduce measurement noise, the benchmarks include L2 cache flushing between iterations using a 256 MB scratch buffer, preventing subsequent runs from benefiting from cached data. Each benchmark includes a warmup phase followed by at least 100 measured iterations, with results reported using the median and interquartile range.
+
+**Optimization driven by profiling results.** Each kernel was first implemented with a straightforward design, benchmarked, and then optimized based on observed bottlenecks. Optimizations were evaluated through measurement rather than assumptions about expected improvements.
+
+Some optimization attempts did not provide benefits and were removed. For example:
+
+- Kernel 1's shared-memory row-staging approach showed no improvement because the targeted memory access pattern was already benefiting from L2 cache, while the added shared-memory usage reduced occupancy and caused around a 5% slowdown.
+
+- Kernel 9's increase of kBlockK from 8 to 16 produced no throughput improvement and reduced performance for some input sizes.
+
+- Kernel 3's initial vectorization attempt introduced a launch configuration issue that made performance worse. The issue was identified, corrected, and documented instead of being included as an ineffective optimization.
+
+These experiments and their measured results are documented in project_plan.md.
+
+**Transparent performance reporting.** Performance targets are reported based on actual measurements, including cases where a kernel does not outperform the baseline. Kernel 5 (fused MatMul + bias) and Kernel 8 (fused cosine similarity top-k) do not meet their target performance compared to cuBLAS-backed implementations, while Kernel 9 falls short for larger embedding dimensions.
+
+These results are documented along with the reasons behind them. In some cases, vendor libraries such as cuBLAS have highly optimized implementations using specialized hardware features like tensor cores, making it unrealistic for a custom kernel without those optimizations to achieve the same throughput. Reporting these limitations provides a more accurate view of the project's performance.
+
+**Correctness before optimization.** Performance measurements are only collected after each kernel passes its correctness tests. The test suite contains 1,665 tests covering fp32, fp16, and bf16 precision, non-contiguous tensors, and edge cases such as empty batches, single-dimensional inputs, single-token workloads, and non-power-of-two dimensions.
+
+Across the 12 kernels, 1,539 tests execute independently without requiring **torch.compile**. The remaining tests compare results against **torch.compile** implementations for cases where that comparison provides a meaningful reference
 
 ## Integration Proof: A Real Llama-3-8B Block
 
-Every kernel above is validated against synthetic `[M, N]` test tensors - necessary, but it doesn't prove the kernels actually help a real model. `examples/llama_block.py` builds an actual Llama-3-8B-shaped decoder block two ways from the same base class and the same weights: once with plain PyTorch eager ops, once with Kernel 1 (RMSNorm + Residual), Kernel 2 (SwiGLU), and Kernel 3 (RoPE) dropped in. Real config values throughout - `hidden_size=4096`, `intermediate_size=14336`, 32 query heads / 8 KV heads (actual grouped-query attention, not a simplified stand-in), `rope_theta=500000`, `rms_norm_eps=1e-5` - the numbers in Meta's released Llama-3-8B `config.json`, not round numbers picked for convenience.
+The individual kernels in this repository are validated using synthetic test tensors, which verifies their correctness in isolation. To demonstrate their use in a realistic setting, `examples/llama_block.py` implements a Llama 3 8B decoder block in two configurations using the same model architecture and identical weights.
 
-QKV/output projections, the FFN's two big matmuls, and attention itself are byte-for-byte identical PyTorch code in both blocks - none of the 12 kernels touch those, so the measured difference below is attributable *only* to the three fused kernels, not to a faster GEMM or attention implementation smuggled into the comparison. A numerical correctness check between the two blocks runs and must pass before any benchmark number is printed.
+The first implementation uses standard PyTorch eager operations, while the second replaces the corresponding operations with the custom implementations of Kernel 1 (RMSNorm + Residual), Kernel 2 (SwiGLU), and Kernel 3 (RoPE).
+
+The decoder block uses the same configuration as the released Llama 3 8B model, including `hidden_size=4096`, `intermediate_size=14336`, 32 query heads, 8 key-value heads for grouped-query attention, `rope_theta=500000`, and `rms_norm_eps=1e-5`.
+
+All remaining components, including the QKV projections, output projection, feed-forward matrix multiplications, and attention computation, are implemented using identical PyTorch code in both versions. Since these operations are unchanged, any measured performance difference can be attributed to the three custom kernels rather than differences in GEMM or attention implementations.
+
+Before benchmarking, the outputs of both decoder blocks are compared to verify numerical agreement. Performance measurements are only collected after this correctness check passes.
 
 ```
 $ python examples/llama_block.py
@@ -120,7 +146,11 @@ Correctness check passed - outputs match within bf16 tolerance.
 └─────────────┴─────────────────────┴────────────────────┴────────────────────┘
 ```
 
-**1.29x faster, 528 MB (23.3%) less peak VRAM, for one block's forward pass at batch=1, seq_len=4096, bf16** - on an RTX 4070 Laptop GPU. That's a deliberately modest number next to the 2-12x per-kernel speedups in the section below, and that's expected: only 3 of roughly 10 ops in a decoder block were replaced, and those 3 are the cheapest ones already - bandwidth-bound elementwise and reduction kernels, dwarfed in total runtime by the big compute-bound GEMMs and attention that are identical in both blocks. The per-kernel numbers below answer "how much faster is this specific op"; this benchmark answers the different question of whether that translates into a real, honest improvement in an actual model, stacked 32 times over in a real Llama-3-8B forward pass - and confirms it does, without overstating by how much.
+On an RTX 4070 Laptop GPU, replacing the three PyTorch operations with their custom kernel implementations reduced the decoder block's forward-pass runtime by **1.29×** and lowered peak VRAM usage by **528 MB (23.3%)** for a configuration of `batch_size=1`, `seq_len=4096`, and `bf16`.
+
+The overall speedup is more modest than the individual kernel benchmarks presented later in this document, which is expected. Only three operations within the decoder block were replaced, while the computationally dominant components, including the matrix multiplications and attention layers, remain standard PyTorch implementations in both versions.
+
+The individual kernel benchmarks measure the performance improvement of each operation in isolation. The decoder block benchmark serves a different purpose: it demonstrates that replacing these kernels within a realistic model produces a measurable improvement in end-to-end execution while keeping the rest of the implementation unchanged.
 
 ## The 12 Kernels
 
