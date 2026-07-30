@@ -30,11 +30,14 @@ in a scatter is an all-pairs-visible context, and this repo's validated
 palette.md`) only clears the automated colorblind-safety gate for its
 first 3 slots under all-pairs comparison — checked with
 `scripts/validate_palette.js`, not eyeballed, and it fails at 6 as
-expected. The palette's own mitigation for that case is what's applied
-here: every bubble/bar is directly labeled (never color-alone), plus a
-distinct marker *shape* per domain as a second channel independent of
-hue, so identity holds even for a colorblind viewer or a grayscale
-printout.
+expected. Direct labeling is the mitigation the palette's own docs list
+for that case (alongside shape and texture); every bubble/bar here is
+individually labeled with its kernel name, so identity never depends on
+hue alone even for a colorblind viewer. Markers are uniform circles
+(not a shape-per-domain scheme) — legible bubble shape matters more
+than a second identity channel once every point already carries its
+own label, and mixed marker shapes made the chart read as decorative
+icons rather than data.
 
 Run directly: `python scripts/plot_linkedin_showcase.py`.
 """
@@ -64,18 +67,18 @@ PEAK_BANDWIDTH_GB_S = 256.0  # RTX 4070 Laptop GPU, consistent with every benchm
 # ---------------------------------------------------------------------------
 # Domain palette: validated 8-hue categorical order (dataviz skill), 6 of the
 # 8 slots picked to avoid the two pairs the palette's own docs flag as weak
-# under all-pairs viewing (yellow-vs-orange, aqua-vs-green). Each domain also
-# gets a distinct marker shape — the secondary encoding channel the palette
-# requires once a chart exceeds 3 simultaneously-visible categories.
+# under all-pairs viewing (yellow-vs-orange, aqua-vs-green). Direct labeling
+# of every point (not marker shape) is the secondary channel used here — see
+# the module docstring.
 # ---------------------------------------------------------------------------
 
 DOMAIN_STYLE: dict[str, dict[str, str]] = {
-    "Core Transformer Ops": {"color": "#2a78d6", "marker": "o"},
-    "Compute & Loss": {"color": "#e87ba4", "marker": "s"},
-    "MoE Routing & Permutation": {"color": "#4a3aa7", "marker": "^"},
-    "RAG & Vector Search": {"color": "#008300", "marker": "D"},
-    "Graph & Sequence": {"color": "#eb6834", "marker": "P"},
-    "Precision & Quantization": {"color": "#e34948", "marker": "*"},
+    "Core Transformer Ops": {"color": "#2a78d6"},
+    "Compute & Loss": {"color": "#e87ba4"},
+    "MoE Routing & Permutation": {"color": "#4a3aa7"},
+    "RAG & Vector Search": {"color": "#008300"},
+    "Graph & Sequence": {"color": "#eb6834"},
+    "Precision & Quantization": {"color": "#e34948"},
 }
 
 SURFACE = "#fcfcfb"
@@ -155,7 +158,19 @@ class KernelResult:
     domain: str
     speedup: float
     efficiency_pct: float
-    annotation: str
+    metric_text: str
+    eager_ms: float
+    cuda_ms: float
+    kernel_number: int = 0
+
+    @property
+    def time_saved_ms(self) -> float:
+        """Floored at 0: a kernel that's slower than eager didn't save
+        any wall-clock time, and a negative "size" isn't meaningful —
+        the honest fact that it lost time is already visible from its
+        position left of the x=1 baseline, not hidden by this.
+        """
+        return max(self.eager_ms - self.cuda_ms, 0.0)
 
 
 def _bandwidth_metric(
@@ -177,8 +192,8 @@ def _bandwidth_metric(
     else:
         efficiency = float(cuda_row["bandwidth_gb_s"]) / PEAK_BANDWIDTH_GB_S * 100.0
 
-    annotation = f"{display_name}: {efficiency:.0f}% {label_suffix}"
-    return KernelResult(display_name, domain, speedup, efficiency, annotation)
+    metric_text = f"{efficiency:.0f}% {label_suffix}"
+    return KernelResult(display_name, domain, speedup, efficiency, metric_text, eager_ms, cuda_ms)
 
 
 def _cublas_ratio_metric(display_name: str, domain: str, csv_path: Path) -> KernelResult:
@@ -195,8 +210,8 @@ def _cublas_ratio_metric(display_name: str, domain: str, csv_path: Path) -> Kern
     cuda_tflops = float(by_impl["cuda_kernel"]["tflops"])
     f_linear_tflops = float(by_impl["f_linear"]["tflops"])
     efficiency = cuda_tflops / f_linear_tflops * 100.0
-    annotation = f"{display_name}: {efficiency:.0f}% of cuBLAS"
-    return KernelResult(display_name, domain, speedup, efficiency, annotation)
+    metric_text = f"{efficiency:.0f}% of cuBLAS"
+    return KernelResult(display_name, domain, speedup, efficiency, metric_text, eager_ms, cuda_ms)
 
 
 def _vram_metric(
@@ -221,8 +236,10 @@ def _vram_metric(
     reduction_pct = (eager_mb - cuda_mb) / eager_mb * 100.0
     ratio = eager_mb / cuda_mb
 
-    annotation = f"{display_name}: {ratio:.0f}x VRAM Saved"
-    return KernelResult(display_name, domain, speedup, reduction_pct, annotation)
+    metric_text = f"{ratio:.0f}x VRAM saved"
+    return KernelResult(
+        display_name, domain, speedup, reduction_pct, metric_text, perf_eager_ms, perf_cuda_ms,
+    )
 
 
 def _launch_reduction_metric(display_name: str, domain: str, csv_path: Path) -> KernelResult:
@@ -240,8 +257,8 @@ def _launch_reduction_metric(display_name: str, domain: str, csv_path: Path) -> 
     speedup = eager_ms / cuda_ms
     seq_len = float(by_impl["cuda_kernel"]["seq_len"])
     efficiency = (1.0 - 1.0 / seq_len) * 100.0
-    annotation = f"{display_name}: {speedup:.0f}x, O(1) launches"
-    return KernelResult(display_name, domain, speedup, efficiency, annotation)
+    metric_text = "O(1) launches"
+    return KernelResult(display_name, domain, speedup, efficiency, metric_text, eager_ms, cuda_ms)
 
 
 def _average(
@@ -249,8 +266,10 @@ def _average(
 ) -> KernelResult:
     speedup = sum(r.speedup for r in results) / len(results)
     efficiency = sum(r.efficiency_pct for r in results) / len(results)
-    annotation = f"{name}: {efficiency:.0f}% {label_suffix}"
-    return KernelResult(name, domain, speedup, efficiency, annotation)
+    eager_ms = sum(r.eager_ms for r in results) / len(results)
+    cuda_ms = sum(r.cuda_ms for r in results) / len(results)
+    metric_text = f"{efficiency:.0f}% {label_suffix}"
+    return KernelResult(name, domain, speedup, efficiency, metric_text, eager_ms, cuda_ms)
 
 
 def collect_results() -> list[KernelResult]:
@@ -292,6 +311,11 @@ def collect_results() -> list[KernelResult]:
             extra_filter=lambda r: r["fp8_format"] == "e4m3" and r["granularity"] == "block",
         ),
     ]
+    # collect_results() builds this list in kernel-number order (1-12) —
+    # assign numbers positionally rather than threading a number through
+    # every extraction function above.
+    for i, r in enumerate(results, start=1):
+        r.kernel_number = i
     return results
 
 
@@ -311,14 +335,27 @@ def _style_axes(ax) -> None:
     ax.set_axisbelow(True)
 
 
-def _bubble_size(speedup: float, all_speedups: list[float]) -> float:
-    import math
+_SIZE_FLOOR = 260.0
+_SIZE_CEILING = 2500.0
 
-    lo, hi = math.log10(min(all_speedups)), math.log10(max(all_speedups))
-    if hi == lo:
-        return 900.0
-    t = (math.log10(speedup) - lo) / (hi - lo)
-    return 180.0 + t * (1500.0 - 180.0)
+
+def _bubble_size(time_saved_ms: float, max_time_saved_ms: float) -> float:
+    """Area-proportional (not radius-proportional) bubble sizing, floored so
+    the "honest miss" kernels (zero time saved) still render a visible dot
+    instead of vanishing.
+    """
+    if max_time_saved_ms <= 0:
+        return _SIZE_FLOOR
+    frac = max(time_saved_ms, 0.0) / max_time_saved_ms
+    return _SIZE_FLOOR + frac * (_SIZE_CEILING - _SIZE_FLOOR)
+
+
+def _format_ms_saved(ms_val: float) -> str:
+    if ms_val >= 10:
+        return f"{ms_val:.0f} ms saved"
+    if ms_val >= 1:
+        return f"{ms_val:.1f} ms saved"
+    return f"{ms_val * 1000:.0f} µs saved"
 
 
 def plot_efficiency_matrix(results: list[KernelResult]) -> None:
@@ -327,19 +364,27 @@ def plot_efficiency_matrix(results: list[KernelResult]) -> None:
     fig.patch.set_facecolor(SURFACE)
 
     all_speedups = [r.speedup for r in results]
+    x_min = min(0.15, min(all_speedups) * 0.6)
+    x_max = max(all_speedups) * 3.2
+    max_saved = max((r.time_saved_ms for r in results), default=0.0)
+
+    ax.axvspan(x_min, 1.0, color="#e34948", alpha=0.05, zorder=0)
+    ax.axvspan(1.0, x_max, color="#008300", alpha=0.05, zorder=0)
+
     texts = []
     for r in results:
         style = DOMAIN_STYLE[r.domain]
-        size = _bubble_size(r.speedup, all_speedups)
+        size = _bubble_size(r.time_saved_ms, max_saved)
         ax.scatter(
-            r.speedup, r.efficiency_pct, s=size, c=style["color"], marker=style["marker"],
+            r.speedup, r.efficiency_pct, s=size, c=style["color"], marker="o",
             alpha=0.78, edgecolors="white", linewidths=1.8, zorder=3,
         )
         label_bbox = dict(boxstyle="round,pad=0.2", facecolor=SURFACE, edgecolor="none", alpha=0.85)
+        label = f"{r.kernel_number}. {r.name}\n{r.speedup:.2f}x · {r.metric_text}"
         texts.append(
             ax.text(
-                r.speedup, r.efficiency_pct, r.annotation, fontsize=9.5, color=INK_PRIMARY,
-                fontweight="bold", zorder=5, bbox=label_bbox,
+                r.speedup, r.efficiency_pct, label, fontsize=9, color=INK_PRIMARY,
+                fontweight="bold", zorder=5, bbox=label_bbox, linespacing=1.35,
             )
         )
 
@@ -348,12 +393,13 @@ def plot_efficiency_matrix(results: list[KernelResult]) -> None:
         1.05, 2, "PyTorch eager baseline (1x)", fontsize=8.5, color="#e34948", rotation=90,
         va="bottom",
     )
+    ax.text(x_min * 1.05, -3, "SLOWER THAN EAGER", fontsize=8, color="#e34948", va="bottom",
+            alpha=0.85)
+    ax.text(1.15, -3, "FASTER THAN EAGER", fontsize=8, color="#008300", va="bottom", alpha=0.85)
 
     ax.set_xscale("log")
-    x_min = min(0.15, min(all_speedups) * 0.6)
-    x_max = max(all_speedups) * 2.2
     ax.set_xlim(x_min, x_max)
-    ax.set_ylim(-5, 108)
+    ax.set_ylim(-8, 126)
 
     ax.set_xlabel("Latency Speedup vs. PyTorch Eager (log scale)", fontsize=12, color=INK_PRIMARY)
     ax.set_ylabel(
@@ -366,16 +412,31 @@ def plot_efficiency_matrix(results: list[KernelResult]) -> None:
     )
     _style_axes(ax)
 
-    legend_handles = [
+    domain_handles = [
         Line2D(
-            [0], [0], marker=style["marker"], color="none", markerfacecolor=style["color"],
+            [0], [0], marker="o", color="none", markerfacecolor=style["color"],
             markeredgecolor="white", markersize=11, label=domain,
         )
         for domain, style in DOMAIN_STYLE.items()
     ]
-    ax.legend(
-        handles=legend_handles, loc="lower right", frameon=True, facecolor=SURFACE,
+    domain_legend = ax.legend(
+        handles=domain_handles, loc="lower right", frameon=True, facecolor=SURFACE,
         edgecolor=BASELINE, fontsize=9.5, title="Kernel Domain", title_fontsize=10,
+    )
+    ax.add_artist(domain_legend)
+
+    size_fracs = (1.0, 0.45, 0.12)
+    size_handles = [
+        ax.scatter(
+            [], [], s=_bubble_size(max_saved * frac, max_saved), c=INK_MUTED, alpha=0.35,
+            edgecolors=INK_SECONDARY, linewidths=1.0, label=_format_ms_saved(max_saved * frac),
+        )
+        for frac in size_fracs
+    ]
+    ax.legend(
+        handles=size_handles, loc="upper left", frameon=True, facecolor=SURFACE,
+        edgecolor=BASELINE, fontsize=9, title="Bubble Size = Latency Saved", title_fontsize=10,
+        labelspacing=1.6, borderpad=1.1,
     )
 
     adjust_text(
@@ -389,8 +450,9 @@ def plot_efficiency_matrix(results: list[KernelResult]) -> None:
     fig.text(
         0.5, -0.02,
         "Speedup and efficiency are both measured on real hardware (RTX 4070 Laptop, 256 GB/s "
-        "peak) at each kernel's largest benchmarked, production-dtype case — see project_plan.md "
-        "for the full range per kernel.",
+        "peak) at each kernel's largest benchmarked, production-dtype case; bubble size is the "
+        "absolute latency saved at that same case - see project_plan.md for the full range per "
+        "kernel.",
         ha="center", fontsize=8.5, color=INK_MUTED,
     )
 
