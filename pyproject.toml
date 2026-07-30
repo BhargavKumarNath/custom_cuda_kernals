@@ -38,6 +38,7 @@ viz = [
   "matplotlib>=3.8",
   "seaborn>=0.13",
   "pandas>=2.2",
+  "adjustText>=1.0",
 ]
 baselines = [
   "triton>=3.0; platform_system == 'Linux'",

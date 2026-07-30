@@ -8,9 +8,13 @@
 ![CUDA](https://img.shields.io/badge/cuda-11.8%2B-76b900?logo=nvidia&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
-This repository is a custom CUDA C++ kernel library built from scratch for production LLM, retrieval, Mixture-of-Experts (MoE), and graph-sequence workloads. It includes hand-tiled GEMM, RMSNorm, SwiGLU, RoPE, fused cross-entropy, MoE routing and token permutation, cosine-similarity top-k, pairwise distance, spatiotemporal graph message passing, Viterbi decoding, and FP8 quantization. Every kernel integrates directly with PyTorch tensors via a Rust CFFI layer without C wrappers or intermediate buffers. If a tensor is contiguous and CUDA-resident, the library executes on its raw GPU pointer (data_ptr()) directly in VRAM with zero serialization overhead.
+This repository is a custom CUDA C++ kernel library developed from the ground up for LLM inference, retrieval systems, Mixture-of-Experts (MoE) models, and graph-based workloads. It implements a range of GPU kernels, including tiled GEMM, RMSNorm, SwiGLU, RoPE, fused cross-entropy loss, MoE routing and token permutation, cosine similarity top-k search, pairwise distance computation, spatiotemporal graph message passing, Viterbi decoding, and FP8 quantization.
 
-Every kernel here was benchmarked on a real GPU (RTX 4070 Laptop, 256 GB/s peak memory bandwidth) with L2 cache flushing between iterations and CUDA event timing, not wall-clock `time.time()` calls around a `torch.compile` cache-warm run. Where a kernel didn't hit its target - and three of them don't - that's written down next to the ones that do, not edited out. See [`project_plan.md`](./project_plan.md) for the complete build log: every kernel's first-pass implementation, the actual profiling data that drove each revision, and the optimization attempts that didn't pan out.
+Each kernel is integrated directly with PyTorch tensors through a Rust CFFI layer, without relying on additional C wrappers or intermediate memory copies. For CUDA tensors stored contiguously in memory, the library operates directly on the underlying GPU pointers using `data_ptr()`, allowing computations to run directly in VRAM with minimal overhead.
+
+All kernels were evaluated on a real GPU environment using an RTX 4070 Laptop GPU with 256 GB/s peak memory bandwidth. Benchmarking was performed using CUDA events with L2 cache flushing between iterations to ensure more reliable measurements, rather than relying on simple wall-clock timing around cached execution paths.
+
+The project documents both successful optimizations and approaches that did not achieve the expected performance improvements. The complete development process, including initial implementations, profiling results, optimization experiments, and performance analysis, is available in [`project_plan.md`](./project_plan.md).
 
 ---
 
@@ -29,16 +33,21 @@ Every kernel here was benchmarked on a real GPU (RTX 4070 Laptop, 256 GB/s peak 
 
 ## Motivation
 
-PyTorch eager mode is not slow because Python is slow. It's slow because of three specific hardware-level costs that show up in almost every transformer forward pass:
+PyTorch eager execution is not limited by Python performance. The main bottlenecks often come from how operations are mapped onto GPU hardware. In transformer workloads, three issues appear repeatedly: memory bandwidth usage, unnecessary memory allocation, and CUDA kernel launch overhead.
 
-**Memory bandwidth saturation.** A modern GPU can do far more FLOPs per second than it can move bytes per second - an RTX 4070 does about 256 GB/s of memory traffic against tens of TFLOPS of compute. RMSNorm, SwiGLU, and RoPE are all *bandwidth-bound*: they touch a lot of memory to do very little arithmetic per byte. Run them as three separate PyTorch ops (compute the residual sum, then normalize, then scale) and you pay for three full read-modify-write passes over the same tensor when one pass would do. That's not a Python overhead problem - it's DRAM traffic that a fused kernel avoids by construction.
+Memory bandwidth limitations. Modern GPUs can perform significantly more computations per second than they can move data through memory. For example, an RTX 4070 Laptop GPU can deliver tens of TFLOPS of compute while being limited to around 256 GB/s of memory bandwidth. Operations such as RMSNorm, SwiGLU, and RoPE are typically bandwidth-bound because they perform relatively few calculations compared to the amount of data they read and write.
 
-**VRAM footprint expansion.** A cross-entropy loss over a 128K-token vocabulary materializes a `[batch·seq, 128256]` logits tensor before it can even start computing softmax - for an 8K-token batch in fp32, that's over 4 GB for one intermediate that immediately gets thrown away. It's frequently the single largest transient allocation in a training step, and it directly caps how large a batch or context length fits in a given GPU's memory.
+When these operations are executed as separate PyTorch operations, intermediate results are repeatedly written back to and loaded from GPU memory. A fused kernel can combine these steps into a single operation, reducing unnecessary memory transfers by processing the data in one pass.
 
-**Kernel launch overhead.** Every `torch.op(...)` call is a separate CUDA kernel launch, and each launch carries real, fixed CPU-side dispatch cost - on the order of microseconds, which is nothing for one call and everything when you're doing it thousands of times in a loop. A Viterbi decoder that loops over a sequence in Python issues one launch per timestep; at a few microseconds of overhead each, a few thousand timesteps turns into milliseconds of pure launch latency before a single FLOP of useful work happens.
+Reducing intermediate memory usage. Some operations can create large temporary tensors that significantly increase GPU memory consumption. For example, computing cross-entropy loss over a vocabulary of 128K tokens requires generating a logits tensor with shape [batch·seq, 128256] before applying softmax and calculating the loss. For large batches or long context lengths, this intermediate tensor can consume several gigabytes of VRAM despite being discarded immediately afterward.
 
-Fusing operations into a single kernel addresses the first two directly - one read, one write, one allocation instead of several. Persistent kernels that loop internally over a sequence address the third by turning O(sequence length) launches into O(1). None of this requires exotic hardware tricks; it requires writing the kernel by hand instead of composing it from PyTorch primitives, and a zero-copy binding path so that hand-written kernel doesn't lose its gains to a marshaling layer on the way in and out of Python.
+Implementing the computation directly inside a custom kernel avoids materializing unnecessary intermediate results, reducing memory usage and allowing larger workloads to fit on the GPU.
 
+CUDA kernel launch overhead. Each PyTorch operation typically results in a separate CUDA kernel launch. While the overhead of a single launch is small, repeated launches can become significant in workloads with many sequential operations. For example, a Viterbi decoder implemented with a Python loop may launch a separate kernel for every timestep in the sequence. With thousands of timesteps, the accumulated dispatch overhead can become a measurable portion of the runtime.
+
+Custom kernels can reduce this overhead by combining multiple operations into a single execution. Persistent kernels can also keep the computation within one kernel launch by handling iterative work directly on the GPU.
+
+The goal of this project is not to rely on specialized hardware features, but to improve GPU utilization by designing kernels that match the underlying workload. By combining operations where appropriate and providing a direct memory path between PyTorch tensors and CUDA kernels, the library reduces unnecessary data movement, intermediate allocations, and execution overhead.
 ## System Architecture
 
 Four layers, each with one job:

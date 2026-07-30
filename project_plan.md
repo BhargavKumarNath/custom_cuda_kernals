@@ -1451,6 +1451,40 @@ three now done, closing out the phase and the project.
       `pyproject.toml` ("MIT OR Apache-2.0"), but no `LICENSE` file
       exists in the repository yet — flagged for the user to decide on
       rather than added unilaterally.
+- [x] `scripts/plot_linkedin_showcase.py` — two summary charts covering
+      all 12 kernels at once for sharing outside the repo, added after
+      the phase's initial "complete" pass. Reads real numbers straight
+      out of the actual `benchmarks/*.csv` files (never hand-typed);
+      each kernel's "headline" case is picked by one uniform rule
+      (largest benchmarked scale at the best available production
+      dtype) applied identically to all 12, so the selection can't be
+      quietly tuned per kernel to flatter results — which is exactly
+      why MatMul+Bias's honest number here (0.09x, 11x *slower* than
+      cuBLAS-backed eager at its largest benchmarked scale) reads more
+      starkly than the "1.8-3.0 TFLOPS" framing elsewhere in this
+      document: it's the true worst-case-at-scale number, not a
+      cherry-picked one, and is left as-is rather than swapped for a
+      smaller, flattering shape. `01_gpu_efficiency_matrix.png/svg`: a
+      bubble scatter, log-x speedup vs. eager against a per-kernel-type
+      "hardware efficiency" (bandwidth % of peak for bandwidth-bound
+      kernels, % of cuBLAS throughput for Kernel 5's compute-bound GEMM,
+      % VRAM reduction for Kernel 4, and — since Kernel 11 has no
+      bandwidth/TFLOPS ceiling to measure against at all, being
+      launch-latency-bound rather than memory- or compute-bound — %
+      of the theoretically possible launch-count reduction (O(seq_len)
+      -> O(1)) it actually achieved, a real property of that kernel
+      rather than a metric borrowed from the others). `02_executive_
+      scorecard.png/svg`: a two-panel horizontal-bar leaderboard, same
+      kernel order in both panels. Colors are the `dataviz` skill's
+      validated 8-hue categorical palette, 6 slots picked for the 6
+      kernel-domain groups; run through `validate_palette.js` rather
+      than eyeballed, which correctly FAILs at 6 simultaneously-visible
+      categories (the palette's own docs note it only clears the
+      automated colorblind-safety gate up to 3 for all-pairs-visible
+      chart forms like a scatter) — mitigated per the skill's own
+      guidance for that case with a second, color-independent channel
+      (a distinct marker shape per domain) plus direct-labeling every
+      single bubble/bar, so identity never depends on hue alone.
 
 Each phase's kernels must individually clear all six lifecycle steps in
 Section 2 before that kernel is marked complete; a phase is complete only
