@@ -33,17 +33,17 @@ The project documents both successful optimizations and approaches that did not 
 
 ## Motivation
 
-PyTorch eager execution is not limited by Python performance. The main bottlenecks often come from how operations are mapped onto GPU hardware. In transformer workloads, three issues appear repeatedly: memory bandwidth usage, unnecessary memory allocation, and CUDA kernel launch overhead.
+PyTorch eager execution is not limited by Python performance. The main bottlenecks often come from how operations are mapped onto GPU hardware. In transformer workloads, three issues appear repeatedly: **memory bandwidth usage**, **unnecessary memory allocation**, and **CUDA kernel launch overhead**.
 
-Memory bandwidth limitations. Modern GPUs can perform significantly more computations per second than they can move data through memory. For example, an RTX 4070 Laptop GPU can deliver tens of TFLOPS of compute while being limited to around 256 GB/s of memory bandwidth. Operations such as RMSNorm, SwiGLU, and RoPE are typically bandwidth-bound because they perform relatively few calculations compared to the amount of data they read and write.
+**Memory bandwidth limitations**. Modern GPUs can perform significantly more computations per second than they can move data through memory. For example, an RTX 4070 Mobile GPU can deliver tens of TFLOPS of compute while being limited to around 256 GB/s of memory bandwidth. Operations such as RMSNorm, SwiGLU, and RoPE are typically bandwidth-bound because they perform relatively few calculations compared to the amount of data they read and write.
 
 When these operations are executed as separate PyTorch operations, intermediate results are repeatedly written back to and loaded from GPU memory. A fused kernel can combine these steps into a single operation, reducing unnecessary memory transfers by processing the data in one pass.
 
-Reducing intermediate memory usage. Some operations can create large temporary tensors that significantly increase GPU memory consumption. For example, computing cross-entropy loss over a vocabulary of 128K tokens requires generating a logits tensor with shape [batch·seq, 128256] before applying softmax and calculating the loss. For large batches or long context lengths, this intermediate tensor can consume several gigabytes of VRAM despite being discarded immediately afterward.
+**Reducing intermediate memory usage**. Some operations can create large temporary tensors that significantly increase GPU memory consumption. For example, computing cross-entropy loss over a vocabulary of 128K tokens requires generating a logits tensor with shape [`batch·seq, 128256`] before applying softmax and calculating the loss. For large batches or long context lengths, this intermediate tensor can consume several gigabytes of VRAM despite being discarded immediately afterward.
 
 Implementing the computation directly inside a custom kernel avoids materializing unnecessary intermediate results, reducing memory usage and allowing larger workloads to fit on the GPU.
 
-CUDA kernel launch overhead. Each PyTorch operation typically results in a separate CUDA kernel launch. While the overhead of a single launch is small, repeated launches can become significant in workloads with many sequential operations. For example, a Viterbi decoder implemented with a Python loop may launch a separate kernel for every timestep in the sequence. With thousands of timesteps, the accumulated dispatch overhead can become a measurable portion of the runtime.
+**CUDA kernel launch overhead**. Each PyTorch operation typically results in a separate CUDA kernel launch. While the overhead of a single launch is small, repeated launches can become significant in workloads with many sequential operations. For example, a Viterbi decoder implemented with a Python loop may launch a separate kernel for every timestep in the sequence. With thousands of timesteps, the accumulated dispatch overhead can become a measurable portion of the runtime.
 
 Custom kernels can reduce this overhead by combining multiple operations into a single execution. Persistent kernels can also keep the computation within one kernel launch by handling iterative work directly on the GPU.
 
@@ -77,9 +77,15 @@ Four layers, each with one job:
   staging, vectorized uint4 loads/stores, persistent kernels
 ```
 
-The pointer that reaches `csrc/kernels/*.cu` is the *same* device pointer PyTorch's allocator is already holding - there's no DLPack capsule exchange, no CPU staging, no extra allocation anywhere on this path. The Rust layer's only job is turning "is this actually safe to hand to a raw CUDA kernel" (right device, right dtype, contiguous, right shape) into a normal Python exception if it isn't, and pulling the CUDA stream PyTorch itself is currently using so kernel launches stay ordered correctly against the rest of a model's forward pass.
+The CUDA kernels in `csrc/kernels/*.cu` operate directly on the same device memory allocated and managed by PyTorch. There is no DLPack conversion, CPU memory staging, or additional allocation involved in the execution path. The Rust layer is responsible only for validating that a tensor can be safely passed to a raw CUDA kernel, including checking the device, data type, memory layout, and shape. It also retrieves the CUDA stream currently used by PyTorch so that custom kernel execution remains correctly synchronized with the rest of the model's computation.
 
-There's no `setuptools`, no `CMakeLists.txt`, and no separate native-extension build step for a user to run. `build.rs` - a normal Rust build script, invoked automatically by `cargo`/`maturin` before compiling the crate - globs every `.cu` file under `csrc/kernels/`, locates the CUDA toolkit via `CUDA_PATH`/`CUDA_HOME`, and shells out to `nvcc -c ... -O3 --use_fast_math -arch=sm_89 -std=c++17` for each one. On Windows, `nvcc` needs `cl.exe` as its host compiler and `cl.exe` is usually not on `PATH` outside a Visual Studio Developer Command Prompt; `build.rs` works around this by reusing the `cc` crate's own MSVC auto-detection (the same mechanism `cargo` itself relies on for compiling C dependencies) to find `cl.exe` and pass it to `nvcc` via `-ccbin`, without requiring the user to open a special shell. The resulting object files are archived into a static library and linked straight into the `cdylib` PyO3 build - one `maturin develop` compiles the CUDA kernels, links the Rust bindings, and drops a working `custom_cuda._native` extension module into the Python package, in one command.
+The project does not rely on `setuptools`, `CMakeLists.txt`, or a separate native extension build process. Instead, the CUDA compilation is handled through `build.rs`, a standard Rust build script that runs automatically during the `cargo` or `maturin` build process.
+
+During compilation, `build.rs` discovers the CUDA source files under `csrc/kernels/`, locates the installed CUDA toolkit using `CUDA_PATH` or `CUDA_HOME`, and compiles each kernel with `nvcc` using optimized build settings (`-O3`, `--use_fast_math`, `-arch=sm_89`, and `-std=c++17`).
+
+On Windows, CUDA compilation requires `cl.exe` as the host compiler. Since it is not always available through the default system path, the build script uses the `cc` crate's MSVC detection mechanism to locate the compiler automatically and passes it to `nvcc` through the `-ccbin` option. This avoids requiring users to manually open a Visual Studio Developer Command Prompt before building.
+
+The compiled CUDA object files are packaged into a static library and linked directly into the PyO3-based Python extension. As a result, running `maturin develop` handles the complete build process: compiling CUDA kernels, linking the Rust bindings, and installing the resulting `custom_cuda._native` extension module into the Python environment.
 
 ## Engineering Principles
 
