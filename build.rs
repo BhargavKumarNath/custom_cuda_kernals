@@ -37,14 +37,6 @@ fn main() {
         return;
     }
 
-    // CI escape hatch: set SKIP_CUDA_BUILD=1 on runners that don't have nvcc
-    // (e.g. GitHub-hosted ubuntu-latest). The Rust/PyO3 layer still compiles
-    // and all FFI types are validated; only the CUDA object linking is skipped.
-    if env::var("SKIP_CUDA_BUILD").as_deref() == Ok("1") {
-        println!("cargo:warning=SKIP_CUDA_BUILD=1: skipping nvcc compilation (CI mode)");
-        return;
-    }
-
     let cuda_path = locate_cuda();
     let nvcc = cuda_path.join("bin").join("nvcc.exe");
     if !nvcc.exists() {
