@@ -295,8 +295,8 @@ custom_cuda_cli profile swiglu --iters 20
 Requires a CUDA-capable GPU, the CUDA toolkit (11.8+, `nvcc` and `CUDA_PATH`/`CUDA_HOME` set), a Rust toolchain (1.75+), and Python 3.9+ with PyTorch 2.3+.
 
 ```bash
-git clone git@github.com:BhargavKumarNath/custom_cuda_kernals.git
-cd custom_cuda_kernals
+git clone https://github.com/BhargavKumarNath/custom_cuda_kernels.git
+cd custom_cuda_kernels
 python -m venv .venv && source .venv/bin/activate   # .venv\Scripts\activate on Windows
 pip install maturin
 maturin develop --release                            # builds the CUDA kernels + Rust bindings
