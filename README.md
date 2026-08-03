@@ -2,7 +2,7 @@
 
 **12 hand-written CUDA kernels for LLM, RAG, MoE, and graph workloads - wrapped in Rust and exposed to PyTorch as zero-copy, GPU-resident drop-in ops.**
 
-![Build](https://img.shields.io/badge/build-maturin%20%7C%20passing-2ea44f)
+[![CI](https://github.com/BhargavKumarNath/custom_cuda_kernels/actions/workflows/ci.yml/badge.svg)](https://github.com/BhargavKumarNath/custom_cuda_kernels/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-dea584?logo=rust&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/pytorch-2.3%2B-ee4c2c?logo=pytorch&logoColor=white)
 ![CUDA](https://img.shields.io/badge/cuda-11.8%2B-76b900?logo=nvidia&logoColor=white)
